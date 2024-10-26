@@ -15,6 +15,7 @@
 from __future__ import annotations, print_function
 
 import asyncio
+import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from typing import Literal
 
 import numpy as np
 import onnxruntime  # type: ignore
+import websockets
 from livekit import agents, rtc
 from livekit.agents import utils
 
@@ -209,6 +211,17 @@ class VADStream(agents.vad.VADStream):
         self._speech_buffer_max_reached = False
         self._prefix_padding_samples = 0  # (input_sample_rate)
 
+        # New attributes for VAP server
+        self._vap_server_uri = "ws://localhost:8000"
+        self._vap_websocket = None
+        self._vap_sender_task = None
+        self._vap_receiver_task = None  # Add this for receiving VAP results
+        self._vap_audio_queue = asyncio.Queue()
+        self._audio_buffer = np.array([], dtype=np.float32)
+        self._buffer_duration = 0.0
+        self._vap_analysis_result = {}  # Store the latest VAP analysis result
+        self._vap_audio_queue = asyncio.Queue()
+
     def update_options(
         self,
         *,
@@ -283,6 +296,72 @@ class VADStream(agents.vad.VADStream):
 
         extra_inference_time = 0.0
 
+        async def initialize_vap_websocket():
+            self._vap_websocket = await websockets.connect(self._vap_server_uri)
+
+            # Send configuration message with thresholds
+            await self._vap_websocket.send(
+                json.dumps(
+                    {
+                        "type": "config",
+                        "sample_rate": 44100,
+                        "lower_silence_threshold": 0.5,
+                        "upper_silence_threshold": 10.0,
+                        "p_now_threshold": 0.7,
+                        "p_future_threshold": 0.7,
+                        "p_bc_react_threshold": 0.2,
+                    }
+                )
+            )
+
+            logger.info("Connected to VAP server; sample_rate: %d", 44100)
+
+            # Start the VAP sender and receiver tasks
+            self._vap_sender_task = asyncio.create_task(vap_sender_task())
+            self._vap_receiver_task = asyncio.create_task(vap_receiver_task())
+
+        async def vap_sender_task():
+            try:
+                while True:
+                    float_data = await self._vap_audio_queue.get()
+                    float_bytes = float_data.tobytes()
+                    if self._vap_websocket is not None and self._vap_websocket.open:
+                        await self._vap_websocket.send(float_bytes)
+                        # logger.debug(f"Sent audio data of length: {len(float_data)}")
+                    self._vap_audio_queue.task_done()
+            except asyncio.CancelledError:
+                pass  # Task was cancelled
+            except Exception as e:
+                logger.error(f"Error in VAP sender task: {e}")
+
+        async def vap_receiver_task():
+            try:
+                async for message in self._vap_websocket:
+                    # Process the VAP analysis result
+                    vap_result = json.loads(message)
+                    # Store the result for later use
+                    self._vap_analysis_result = vap_result
+                    # Emit an event with the VAP analysis result
+                    self._event_ch.send_nowait(
+                        agents.vad.VADEvent(
+                            type=agents.vad.VADEventType.CUSTOM,  # Add a new event type if needed
+                            samples_index=0,
+                            timestamp=time.time(),
+                            silence_duration=0.0,
+                            speech_duration=0.0,
+                            frames=[],
+                            speaking=False,
+                            vap_result=vap_result,
+                        )
+                    )
+            except asyncio.CancelledError:
+                pass  # Task was cancelled
+            except Exception as e:
+                logger.error(f"Error in VAP receiver task: {e}")
+
+        # Initialize the VAP WebSocket connection
+        await initialize_vap_websocket()
+
         async for input_frame in self._input_ch:
             if not isinstance(input_frame, rtc.AudioFrame):
                 continue  # ignore flush sentinel for now
@@ -324,6 +403,25 @@ class VADStream(agents.vad.VADStream):
             else:
                 inference_frames.append(input_frame)
 
+            # Accumulate audio data for VAP server
+            input_data = input_frame.data
+
+            # Convert int16 data to Float32
+            int_data = np.frombuffer(input_data, dtype=np.int16)
+            float_data = (
+                int_data.astype(np.float32) / 32767.0
+            )  # Normalize to [-1.0, 1.0]
+
+            # Accumulate data
+            self._audio_buffer = np.concatenate((self._audio_buffer, float_data))
+            self._buffer_duration += len(float_data) / self._input_sample_rate
+
+            # If buffer duration exceeds threshold, send data
+            if self._buffer_duration >= 0.2:  # Adjust the threshold as needed
+                await self._vap_audio_queue.put(self._audio_buffer.copy())
+                # Clear buffer
+                self._audio_buffer = np.array([], dtype=np.float32)
+                self._buffer_duration = 0.0
             while True:
                 start_time = time.perf_counter()
 
@@ -442,6 +540,7 @@ class VADStream(agents.vad.VADStream):
                             )
                         ],
                         speaking=pub_speaking,
+                        vap_result=self._vap_analysis_result,
                     )
                 )
 
@@ -464,6 +563,7 @@ class VADStream(agents.vad.VADStream):
                                     speech_duration=pub_speech_duration,
                                     frames=[_copy_speech_buffer()],
                                     speaking=True,
+                                    vap_result=self._vap_analysis_result,
                                 )
                             )
 
@@ -492,6 +592,7 @@ class VADStream(agents.vad.VADStream):
                                 speech_duration=pub_speech_duration,
                                 frames=[_copy_speech_buffer()],
                                 speaking=False,
+                                vap_result=self._vap_analysis_result,
                             )
                         )
 
