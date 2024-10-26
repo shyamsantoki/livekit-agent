@@ -19,7 +19,7 @@ import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import List, Literal
+from typing import Literal
 
 import numpy as np
 import onnxruntime  # type: ignore

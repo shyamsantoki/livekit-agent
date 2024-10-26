@@ -826,10 +826,6 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
     def _validate_reply_if_possible(self) -> None:
         """Check if the new agent speech should be played"""
 
-        # logger.error("_validate_reply_if_possible VAP condition: " + self._vap_condition)
-        # if "TAKEOVER" not in self._vap_condition:
-        #     return
-
         if (
             self._playing_speech is not None
             and not self._playing_speech.allow_interruptions
