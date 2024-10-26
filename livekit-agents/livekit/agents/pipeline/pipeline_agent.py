@@ -261,6 +261,9 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
 
         self._update_state_task: asyncio.Task | None = None
 
+        # New attribute to store the latest VAP condition
+        self._vap_condition = None
+
     @property
     def fnc_ctx(self) -> FunctionContext | None:
         return self._fnc_ctx
@@ -406,12 +409,25 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
             transcription=self._opts.transcription.user_transcription,
         )
 
+        def _on_vap_analysis_result(ev: vad.VADEvent) -> None:
+            vap_result = ev.vap_result
+            self._vap_condition = {
+                "p_now": vap_result.get("p_now", ""),
+                "p_future": vap_result.get("p_future", ""),
+                "p_bc_react": vap_result.get("p_bc_react", ""),
+                "p_bc_emo": vap_result.get("p_bc_emo", ""),
+            }
+            # logger.debug("VAP condition", extra=self._vap_condition)
+
         def _on_start_of_speech(ev: vad.VADEvent) -> None:
+            logger.debug("VAP condition at speech start", extra=ev.vap_result)
             self._plotter.plot_event("user_started_speaking")
             self.emit("user_started_speaking")
             self._deferred_validation.on_human_start_of_speech(ev)
 
         def _on_vad_updated(ev: vad.VADEvent) -> None:
+            # logger.debug("received vad inference done event")
+            # logger.debug("VAP condition: " + ev.vap_result.get("condition", ""))
             if not self._track_published_fut.done():
                 return
 
@@ -432,6 +448,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
                 self._interrupt_if_possible()
 
         def _on_end_of_speech(ev: vad.VADEvent) -> None:
+            logger.debug("VAP condition at speech end", extra=ev.vap_result)
             self._plotter.plot_event("user_stopped_speaking")
             self.emit("user_stopped_speaking")
             self._deferred_validation.on_human_end_of_speech(ev)
@@ -476,6 +493,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
         self._human_input.on("end_of_speech", _on_end_of_speech)
         self._human_input.on("interim_transcript", _on_interim_transcript)
         self._human_input.on("final_transcript", _on_final_transcript)
+        self._human_input.on("vap_analysis_result", _on_vap_analysis_result)
 
     @utils.log_exceptions(logger=logger)
     async def _main_task(self) -> None:
@@ -676,7 +694,9 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
             speech_handle.source.function_calls
         )
 
-        extra_tools_messages = []  # additional messages from the functions to add to the context if needed
+        extra_tools_messages = (
+            []
+        )  # additional messages from the functions to add to the context if needed
 
         # if the answer is using tools, execute the functions and automatically generate
         # a response to the user question from the returned values
@@ -747,9 +767,11 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
 
                 answer_llm_stream = self._llm.chat(
                     chat_ctx=chat_ctx,
-                    fnc_ctx=self.fnc_ctx
-                    if i < self._opts.max_recursive_fnc_calls - 1
-                    else None,
+                    fnc_ctx=(
+                        self.fnc_ctx
+                        if i < self._opts.max_recursive_fnc_calls - 1
+                        else None
+                    ),
                 )
                 answer_synthesis = self._synthesize_agent_speech(
                     speech_handle.id, answer_llm_stream
