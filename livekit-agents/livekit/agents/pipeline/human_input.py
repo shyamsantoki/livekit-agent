@@ -16,6 +16,7 @@ EventTypes = Literal[
     "end_of_speech",
     "final_transcript",
     "interim_transcript",
+    "vap_analysis_result",
 ]
 
 
@@ -133,6 +134,8 @@ class HumanInput(utils.EventEmitter[EventTypes]):
                 elif ev.type == voice_activity_detection.VADEventType.END_OF_SPEECH:
                     self._speaking = False
                     self.emit("end_of_speech", ev)
+                elif ev.type == voice_activity_detection.VADEventType.CUSTOM:
+                    self.emit("vap_analysis_result", ev)
 
         async def _stt_stream_co() -> None:
             async for ev in stt_stream:
