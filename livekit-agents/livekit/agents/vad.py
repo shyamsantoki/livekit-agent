@@ -16,6 +16,7 @@ class VADEventType(str, Enum):
     START_OF_SPEECH = "start_of_speech"
     INFERENCE_DONE = "inference_done"
     END_OF_SPEECH = "end_of_speech"
+    CUSTOM = "vap_analysis_result"
 
 
 @dataclass
@@ -56,6 +57,8 @@ class VADEvent:
 
     speaking: bool = False
     """Indicates whether speech was detected in the frames."""
+
+    vap_result: dict = field(default_factory=dict)
 
 
 @dataclass
